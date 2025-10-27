@@ -304,3 +304,6 @@ max=fmax(fmax(a,b),c);
 min=fmin(fmin(a,b),c);
 
 知识点：3.1.3 if-else选择结构（嵌套版）
+
+
+[第二次培训AC代码](https://github.com/QFNU-PCT/course-materials/releases/download/training-2/training-2-AC-code.zip)
