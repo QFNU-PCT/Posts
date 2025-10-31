@@ -1,0 +1,68 @@
+name: Weekly Submission Summary
+
+on:
+  schedule:
+    # 每周六中午 12:00 (UTC+8)
+    - cron: "0 4 * * 6"  # UTC+4 = 北京时间12点
+  workflow_dispatch:  # 可手动触发
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y gh jq
+
+      - name: Collect submissions from commits in last 7 days
+        id: collect
+        run: |
+          echo "📊 收集最近 7 天的提交记录..."
+          since=$(date -u -d "-7 days" +"%Y-%m-%dT%H:%M:%SZ")
+          commits=$(gh api repos/${{ github.repository }}/commits --paginate -q ".[] | select(.commit.author.date > \"$since\") | .files? // [] | .[]?.filename" || true)
+
+          if [ -z "$commits" ]; then
+            echo "没有新提交"
+            echo "result=None" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 提取学号
+          ids=$(echo "$commits" | grep -Eo '2025413[0-9]{3}\.md' | sed 's/\.md//' | sort -u)
+          if [ -z "$ids" ]; then
+            echo "result=None" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "本周提交学号:"
+          echo "$ids"
+          echo "result=$ids" >> $GITHUB_OUTPUT
+
+      - name: Post weekly summary comment
+        if: steps.collect.outputs.result != 'None'
+        run: |
+          ids="${{ steps.collect.outputs.result }}"
+          week=$(date +'%Y-%m-%d')
+          body="📚 **${week} 本周提交笔记的学号名单**\n\n"
+          body+="| 序号 | 学号 |\n|------|------|\n"
+          i=1
+          for id in $ids; do
+            body+="| $i | $id |\n"
+            ((i++))
+          done
+
+          gh issue list --search "每周笔记统计" --limit 1 --json number | jq -r '.[0].number' > issue.txt || true
+          issue_num=$(cat issue.txt)
+          if [ "$issue_num" = "null" ] || [ -z "$issue_num" ]; then
+            gh issue create --title "📅 每周笔记统计" --body "$body"
+          else
+            gh issue comment "$issue_num" --body "$body"
+          fi
