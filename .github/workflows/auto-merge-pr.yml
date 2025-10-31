@@ -1,23 +1,30 @@
 name: Auto Check & Merge Study Notes PR
 
 on:
-  pull_request:
+  # 使用 pull_request_target 而非 pull_request，这是解决权限问题的关键
+  pull_request_target:
     types: [opened, reopened, synchronize]
 
 # 设置工作流级别权限
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   validate-and-merge:
+    # 🔒 重要安全措施：只处理来自本仓库的 PR，避免执行不受信任的代码
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    
     runs-on: ubuntu-latest
     steps:
-      # 1️⃣ 检出仓库代码
+      # 1️⃣ 检出代码（安全地检出 PR 的提交，而非分支）
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}  # 关键安全设置
 
-      # 2️⃣ 配置 GitHub CLI 身份验证（关键修复）
+      # 2️⃣ 配置 GitHub CLI
       - name: Setup GitHub CLI
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -25,12 +32,12 @@ jobs:
           echo "配置 GitHub CLI 身份验证"
           gh auth status
 
-      # 3️⃣ 验证 PR 文件（已修复 GH_TOKEN 问题）
+      # 3️⃣ 验证 PR 文件（核心验证逻辑）
       - name: Validate PR files
         id: validate
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 关键修复点
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "开始检查 PR #$PR_NUMBER"
 
@@ -59,7 +66,7 @@ jobs:
               continue
             fi
 
-            # 文件名格式：以 2025413 开头 + 10 位数字
+            # 文件名格式验证
             if [[ ! $BASENAME =~ ^2025413[0-9]{3}\.md$ ]]; then
               ERRORS+="❌ 文件名不符合要求: **$FILE**，应为 2025413xxxx.md\n"
               VALID=false
