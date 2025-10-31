@@ -4,6 +4,7 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# 设置工作流级别权限
 permissions:
   contents: write
   pull-requests: write
@@ -12,16 +13,24 @@ jobs:
   validate-and-merge:
     runs-on: ubuntu-latest
     steps:
-
       # 1️⃣ 检出仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ 验证 PR 文件
+      # 2️⃣ 配置 GitHub CLI 身份验证（关键修复）
+      - name: Setup GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "配置 GitHub CLI 身份验证"
+          gh auth status
+
+      # 3️⃣ 验证 PR 文件（已修复 GH_TOKEN 问题）
       - name: Validate PR files
         id: validate
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 关键修复点
         run: |
           echo "开始检查 PR #$PR_NUMBER"
 
@@ -33,12 +42,21 @@ jobs:
           ERRORS=""
 
           for FILE in $PR_FILES; do
+            echo "检查文件: $FILE"
             BASENAME=$(basename "$FILE")
 
             # 检查扩展名
             if [[ ! $FILE =~ \.md$ ]]; then
               ERRORS+="❌ 文件 **$FILE** 不是 Markdown (.md) 文件\n"
               VALID=false
+              continue
+            fi
+
+            # 检查文件是否存在
+            if [[ ! -f "$FILE" ]]; then
+              ERRORS+="❌ 文件 **$FILE** 在仓库中不存在\n"
+              VALID=false
+              continue
             fi
 
             # 文件名格式：以 2025413 开头 + 10 位数字
@@ -70,7 +88,7 @@ jobs:
             fi
 
             # 检查 copyright_author
-            AUTHOR=$(echo "$HEAD_CONTENT" | grep "copyright_author:" | awk -F': ' '{print $2}' | tr -d '\r')
+            AUTHOR=$(echo "$HEAD_CONTENT" | grep "copyright_author:" | awk -F': ' '{print $2}' | tr -d '\r' | tr -d ' ')
             if [[ -z "$AUTHOR" ]]; then
               ERRORS+="❌ 文件 **$FILE** 的 copyright_author 为空\n"
               VALID=false
@@ -83,34 +101,42 @@ jobs:
             fi
           done
 
-          echo "validation=$VALID" >> $GITHUB_OUTPUT
+          echo "validation_result=$VALID" >> $GITHUB_OUTPUT
           echo -e "$ERRORS" > errors.txt
+          echo "验证完成: $VALID"
 
-      # 3️⃣ PR 不合格 → 自动评论 + 自动关闭
+      # 4️⃣ PR 不合格 → 自动评论 + 自动关闭
       - name: Comment and close invalid PR
-        if: steps.validate.outputs.validation == 'false'
+        if: steps.validate.outputs.validation_result == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMMENT_BODY="⚠️ **您的 PR 未通过自动检查，请修改后重新提交。**\n\n"
+          echo "PR 未通过验证，准备评论并关闭..."
+          COMMENT_BODY="⚠️ **您的 PR 未通过自动检查，已自动关闭。请修改后重新提交。**\n\n"
           COMMENT_BODY+="以下是检测到的问题：\n\n$(cat errors.txt)\n\n"
           COMMENT_BODY+="✅ **参考正确格式：**\n\n\`\`\`yaml\n"
           COMMENT_BODY+="---\n"
           COMMENT_BODY+="title: 示例标题\n"
           COMMENT_BODY+="date: 2025-10-31 17:43:20\n"
           COMMENT_BODY+="tags: 笔记\n"
-          COMMENT_BODY+="copyright_author: Alice\n"
+          COMMENT_BODY+="copyright_author: 你的姓名\n"
           COMMENT_BODY+="---\n\`\`\`\n\n"
-          COMMENT_BODY+="📘 文件名示例：\`2025413047.md\`\n"
+          COMMENT_BODY+="📘 文件名示例：\`2025413047.md\`\n\n"
+          COMMENT_BODY+="💡 **修改建议：**\n"
+          COMMENT_BODY+="1. 确保文件扩展名为 .md\n"
+          COMMENT_BODY+="2. 文件名格式为 2025413xxxx.md\n"
+          COMMENT_BODY+="3. 包含完整的 YAML 头部（前后有 ---）\n"
+          COMMENT_BODY+="4. copyright_author 字段使用真实姓名而非学号\n"
 
           gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
           gh pr close ${{ github.event.pull_request.number }} --comment "❌ 未通过格式检查，请根据提示修改后重新提交。"
 
-      # 4️⃣ PR 合格 → 自动批准并合并
+      # 5️⃣ PR 合格 → 自动批准并合并
       - name: Approve and merge valid PR
-        if: steps.validate.outputs.validation == 'true'
+        if: steps.validate.outputs.validation_result == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "PR 通过验证，准备批准并合并..."
           gh pr review ${{ github.event.pull_request.number }} --approve -b "✅ 格式检查通过，自动批准并合并。"
-          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch --auto
+          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
