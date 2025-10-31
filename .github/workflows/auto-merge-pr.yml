@@ -12,18 +12,12 @@ jobs:
   validate-and-merge:
     runs-on: ubuntu-latest
     steps:
-      # 1️⃣ 检出代码
+
+      # 1️⃣ 检出仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ 设置 GH_TOKEN 环境变量，避免权限错误
-      - name: Setup GH CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh auth status
-
-      # 3️⃣ 验证 PR 文件
+      # 2️⃣ 验证 PR 文件
       - name: Validate PR files
         id: validate
         env:
@@ -41,19 +35,19 @@ jobs:
           for FILE in $PR_FILES; do
             BASENAME=$(basename "$FILE")
 
-            # ✅ 检查扩展名
+            # 检查扩展名
             if [[ ! $FILE =~ \.md$ ]]; then
               ERRORS+="❌ 文件 **$FILE** 不是 Markdown (.md) 文件\n"
               VALID=false
             fi
 
-            # ✅ 检查文件名格式：以 2025413 开头 + 10 位数字
+            # 文件名格式：以 2025413 开头 + 10 位数字
             if [[ ! $BASENAME =~ ^2025413[0-9]{3}\.md$ ]]; then
               ERRORS+="❌ 文件名不符合要求: **$FILE**，应为 2025413xxxx.md\n"
               VALID=false
             fi
 
-            # ✅ 检查 YAML 头
+            # 检查 YAML 头
             if ! head -n 10 "$FILE" | grep -q "^---"; then
               ERRORS+="❌ 文件 **$FILE** 缺少 YAML 头部 '---'\n"
               VALID=false
@@ -61,7 +55,7 @@ jobs:
 
             HEAD_CONTENT=$(head -n 10 "$FILE")
 
-            # 检查必备字段
+            # 必备字段检查
             for key in title date tags copyright_author; do
               if ! echo "$HEAD_CONTENT" | grep -q "$key:"; then
                 ERRORS+="❌ 文件 **$FILE** YAML 缺少字段：\`$key\`\n"
@@ -92,7 +86,7 @@ jobs:
           echo "validation=$VALID" >> $GITHUB_OUTPUT
           echo -e "$ERRORS" > errors.txt
 
-      # 4️⃣ 不合格 PR → 自动评论 + 关闭
+      # 3️⃣ PR 不合格 → 自动评论 + 自动关闭
       - name: Comment and close invalid PR
         if: steps.validate.outputs.validation == 'false'
         env:
@@ -112,7 +106,7 @@ jobs:
           gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
           gh pr close ${{ github.event.pull_request.number }} --comment "❌ 未通过格式检查，请根据提示修改后重新提交。"
 
-      # 5️⃣ 合格 PR → 自动批准并合并
+      # 4️⃣ PR 合格 → 自动批准并合并
       - name: Approve and merge valid PR
         if: steps.validate.outputs.validation == 'true'
         env:
