@@ -2,7 +2,7 @@ name: Auto Check & Merge Study Notes PR
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: write
@@ -12,41 +12,106 @@ jobs:
   validate-and-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
+      # 1️⃣ 检出代码
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 设置 GitHub CLI 登录
+      # 2️⃣ 配置 GitHub CLI 登录
+      - name: Setup GH CLI
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
           gh auth status
 
-      - name: 检查 PR 文件格式
+      # 3️⃣ 验证 PR 文件
+      - name: Validate PR files
+        id: validate
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "开始检查 PR #${{ github.event.pull_request.number }}"
-          FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path')
+          echo "开始检查 PR #$PR_NUMBER"
 
-          for file in $FILES; do
-            echo "检查文件: $file"
+          # 获取 PR 文件列表
+          PR_FILES=$(gh pr view $PR_NUMBER --json files --jq '.files[].path')
+          echo "检测到文件: $PR_FILES"
 
-            # 检查文件名是否符合要求
-            if [[ ! $file =~ ^2025413[0-9]{3}\.md$ ]]; then
-              echo "❌ 文件名不符合要求: $file"
-              exit 1
+          VALID=true
+          ERRORS=""
+
+          for FILE in $PR_FILES; do
+            BASENAME=$(basename "$FILE")
+            # 1️⃣ 检查扩展名
+            if [[ ! $FILE =~ \.md$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 不是 Markdown (.md) 文件\n"
+              VALID=false
             fi
 
-            # 检查文件内容是否为 Markdown 且包含所需 YAML 头
-            if ! grep -qE '^---' "$file"; then
-              echo "❌ 缺少 YAML 头: $file"
-              exit 1
+            # 2️⃣ 检查文件名格式：以 2025413 开头 + 10 位数字
+            if [[ ! $BASENAME =~ ^2025413[0-9]{3}\.md$ ]]; then
+              ERRORS+="❌ 文件名不符合要求: **$FILE**，应为 2025413xxxx.md\n"
+              VALID=false
             fi
 
-            if ! grep -qE '^copyright_author:\s*[a-zA-Z0-9_-]+$' "$file"; then
-              echo "❌ copyright_author 不合规"
-              exit 1
+            # 3️⃣ 检查 YAML 头
+            if ! head -n 10 "$FILE" | grep -q "^---"; then
+              ERRORS+="❌ 文件 **$FILE** 缺少 YAML 头部 '---'\n"
+              VALID=false
+            fi
+
+            HEAD_CONTENT=$(head -n 10 "$FILE")
+            # 检查必备字段
+            for key in title date tags copyright_author; do
+              if ! echo "$HEAD_CONTENT" | grep -q "$key:"; then
+                ERRORS+="❌ 文件 **$FILE** YAML 缺少字段：\`$key\`\n"
+                VALID=false
+              fi
+            done
+
+            # 检查 tags
+            if ! echo "$HEAD_CONTENT" | grep -q "tags: *笔记"; then
+              ERRORS+="❌ 文件 **$FILE** 的 tags 必须为 '笔记'\n"
+              VALID=false
+            fi
+
+            # 检查 copyright_author
+            AUTHOR=$(echo "$HEAD_CONTENT" | grep "copyright_author:" | awk -F': ' '{print $2}' | tr -d '\r')
+            if [[ -z "$AUTHOR" ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 为空\n"
+              VALID=false
+            elif [[ $AUTHOR =~ ^[0-9]{10}$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 不应为学号\n"
+              VALID=false
+            elif [[ ! $AUTHOR =~ ^[A-Za-z0-9_一-龥]+$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 含有非法字符，只能使用字母、数字、下划线或中文\n"
+              VALID=false
             fi
           done
 
-      - name: 自动合并符合要求的 PR
-        if: success()
+          echo "validation=$VALID" >> $GITHUB_OUTPUT
+          echo -e "$ERRORS" > errors.txt
+
+      # 4️⃣ 不合格时自动评论并关闭 PR
+      - name: Comment and close invalid PR
+        if: steps.validate.outputs.validation == 'false'
         run: |
-          gh pr merge ${{ github.event.pull_request.number }} --merge --auto
+          COMMENT_BODY="⚠️ **您的 PR 未通过自动检查，请修改后重新提交。**\n\n"
+          COMMENT_BODY+="以下是检测到的问题：\n\n"
+          COMMENT_BODY+="$(cat errors.txt)\n\n"
+          COMMENT_BODY+="✅ **参考正确格式：**\n\n\`\`\`yaml\n"
+          COMMENT_BODY+="---\n"
+          COMMENT_BODY+="title: 示例标题\n"
+          COMMENT_BODY+="date: 2025-10-31 17:43:20\n"
+          COMMENT_BODY+="tags: 笔记\n"
+          COMMENT_BODY+="copyright_author: Alice\n"
+          COMMENT_BODY+="---\n"
+          COMMENT_BODY+="\`\`\`\n\n"
+          COMMENT_BODY+="📘 文件名示例：\`2025413047.md\`\n"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+          gh pr close ${{ github.event.pull_request.number }} --comment "❌ 未通过格式检查，请根据提示修改后重新提交。"
+
+      # 5️⃣ 合格时自动批准并合并
+      - name: Approve and merge valid PR
+        if: steps.validate.outputs.validation == 'true'
+        run: |
+          gh pr review ${{ github.event.pull_request.number }} --approve -b "✅ 格式检查通过，自动批准并合并。"
+          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch --auto
