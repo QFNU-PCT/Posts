@@ -1,149 +1,109 @@
-name: Auto Check & Merge Study Notes PR
+name: 📝 自动审核与合并笔记 PR
 
 on:
-  # 使用 pull_request_target 而非 pull_request，这是解决权限问题的关键
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, synchronize]
+  schedule:
+    - cron: '0 4 * * 6'  # 每周六中午12:00 (UTC+8)，UTC时间为04:00
+  workflow_dispatch:
 
-# 设置工作流级别权限
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 jobs:
-  validate-and-merge:
-    # 🔒 重要安全措施：只处理来自本仓库的 PR，避免执行不受信任的代码
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    
+  check-and-merge:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      # 1️⃣ 检出代码（安全地检出 PR 的提交，而非分支）
-      - name: Checkout repository
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}  # 关键安全设置
+          fetch-depth: 0
 
-      # 2️⃣ 配置 GitHub CLI
-      - name: Setup GitHub CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 安装 jq
+        run: sudo apt-get install -y jq
+
+      - name: 获取 PR 文件列表
+        id: files
         run: |
-          echo "配置 GitHub CLI 身份验证"
-          gh auth status
-
-      # 3️⃣ 验证 PR 文件（核心验证逻辑）
-      - name: Validate PR files
-        id: validate
+          files=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path')
+          echo "files<<EOF" >> $GITHUB_ENV
+          echo "$files" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: 检查文件格式
+        id: check
         run: |
-          echo "开始检查 PR #$PR_NUMBER"
-
-          # 获取 PR 文件列表
-          PR_FILES=$(gh pr view $PR_NUMBER --json files --jq '.files[].path')
-          echo "检测到文件: $PR_FILES"
-
-          VALID=true
-          ERRORS=""
-
-          for FILE in $PR_FILES; do
-            echo "检查文件: $FILE"
-            BASENAME=$(basename "$FILE")
-
-            # 检查扩展名
-            if [[ ! $FILE =~ \.md$ ]]; then
-              ERRORS+="❌ 文件 **$FILE** 不是 Markdown (.md) 文件\n"
-              VALID=false
+          valid=true
+          message=""
+          for file in $files; do
+            filename=$(basename "$file")
+            if [[ ! $filename =~ ^2025413[0-9]{3}\.md$ ]]; then
+              valid=false
+              message+="❌ 文件名不符合要求: $filename\n"
               continue
             fi
-
-            # 检查文件是否存在
-            if [[ ! -f "$FILE" ]]; then
-              ERRORS+="❌ 文件 **$FILE** 在仓库中不存在\n"
-              VALID=false
+            if [[ ! -f "$file" ]]; then
+              valid=false
+              message+="❌ 文件不存在: $file\n"
               continue
             fi
-
-            # 文件名格式验证
-            if [[ ! $BASENAME =~ ^2025413[0-9]{3}\.md$ ]]; then
-              ERRORS+="❌ 文件名不符合要求: **$FILE**，应为 2025413xxxx.md\n"
-              VALID=false
-            fi
-
             # 检查 YAML 头
-            if ! head -n 10 "$FILE" | grep -q "^---"; then
-              ERRORS+="❌ 文件 **$FILE** 缺少 YAML 头部 '---'\n"
-              VALID=false
+            header=$(head -n 10 "$file")
+            if ! echo "$header" | grep -q "^---"; then
+              valid=false
+              message+="❌ 文件缺少 YAML 头: $filename\n"
+              continue
             fi
-
-            HEAD_CONTENT=$(head -n 10 "$FILE")
-
-            # 必备字段检查
-            for key in title date tags copyright_author; do
-              if ! echo "$HEAD_CONTENT" | grep -q "$key:"; then
-                ERRORS+="❌ 文件 **$FILE** YAML 缺少字段：\`$key\`\n"
-                VALID=false
-              fi
-            done
-
-            # 检查 tags
-            if ! echo "$HEAD_CONTENT" | grep -q "tags: *笔记"; then
-              ERRORS+="❌ 文件 **$FILE** 的 tags 必须为 '笔记'\n"
-              VALID=false
+            if ! echo "$header" | grep -q "title:"; then
+              valid=false
+              message+="❌ YAML 缺少 title 字段: $filename\n"
             fi
-
-            # 检查 copyright_author
-            AUTHOR=$(echo "$HEAD_CONTENT" | grep "copyright_author:" | awk -F': ' '{print $2}' | tr -d '\r' | tr -d ' ')
-            if [[ -z "$AUTHOR" ]]; then
-              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 为空\n"
-              VALID=false
-            elif [[ $AUTHOR =~ ^[0-9]{10}$ ]]; then
-              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 不应为学号\n"
-              VALID=false
-            elif [[ ! $AUTHOR =~ ^[A-Za-z0-9_一-龥]+$ ]]; then
-              ERRORS+="❌ 文件 **$FILE** 的 copyright_author 含有非法字符，只能使用字母、数字、下划线或中文\n"
-              VALID=false
+            if ! echo "$header" | grep -q "date:"; then
+              valid=false
+              message+="❌ YAML 缺少 date 字段: $filename\n"
+            fi
+            if ! echo "$header" | grep -q "tags: 笔记"; then
+              valid=false
+              message+="❌ YAML 缺少 tags: 笔记: $filename\n"
+            fi
+            if ! echo "$header" | grep -q "copyright_author:"; then
+              valid=false
+              message+="❌ YAML 缺少 copyright_author 字段: $filename\n"
             fi
           done
 
-          echo "validation_result=$VALID" >> $GITHUB_OUTPUT
-          echo -e "$ERRORS" > errors.txt
-          echo "验证完成: $VALID"
+          echo "valid=$valid" >> $GITHUB_ENV
+          echo "message=$message" >> $GITHUB_ENV
 
-      # 4️⃣ PR 不合格 → 自动评论 + 自动关闭
-      - name: Comment and close invalid PR
-        if: steps.validate.outputs.validation_result == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 处理结果
         run: |
-          echo "PR 未通过验证，准备评论并关闭..."
-          COMMENT_BODY="⚠️ **您的 PR 未通过自动检查，已自动关闭。请修改后重新提交。**\n\n"
-          COMMENT_BODY+="以下是检测到的问题：\n\n$(cat errors.txt)\n\n"
-          COMMENT_BODY+="✅ **参考正确格式：**\n\n\`\`\`yaml\n"
-          COMMENT_BODY+="---\n"
-          COMMENT_BODY+="title: 示例标题\n"
-          COMMENT_BODY+="date: 2025-10-31 17:43:20\n"
-          COMMENT_BODY+="tags: 笔记\n"
-          COMMENT_BODY+="copyright_author: 你的姓名\n"
-          COMMENT_BODY+="---\n\`\`\`\n\n"
-          COMMENT_BODY+="📘 文件名示例：\`2025413047.md\`\n\n"
-          COMMENT_BODY+="💡 **修改建议：**\n"
-          COMMENT_BODY+="1. 确保文件扩展名为 .md\n"
-          COMMENT_BODY+="2. 文件名格式为 2025413xxxx.md\n"
-          COMMENT_BODY+="3. 包含完整的 YAML 头部（前后有 ---）\n"
-          COMMENT_BODY+="4. copyright_author 字段使用真实姓名而非学号\n"
-
-          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
-          gh pr close ${{ github.event.pull_request.number }} --comment "❌ 未通过格式检查，请根据提示修改后重新提交。"
-
-      # 5️⃣ PR 合格 → 自动批准并合并
-      - name: Approve and merge valid PR
-        if: steps.validate.outputs.validation_result == 'true'
+          if [[ "$valid" == "true" ]]; then
+            echo "✅ 格式检查通过，自动合并 PR"
+            gh pr merge ${{ github.event.pull_request.number }} --merge --auto --delete-branch
+          else
+            echo -e "$message"
+            gh pr comment ${{ github.event.pull_request.number }} --body "$message"
+            gh pr close ${{ github.event.pull_request.number }}
+          fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+  weekly-report:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 输出本周提交学号
         run: |
-          echo "PR 通过验证，准备批准并合并..."
-          gh pr review ${{ github.event.pull_request.number }} --approve -b "✅ 格式检查通过，自动批准并合并。"
-          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
+          echo "📘 本周提交的学号列表："
+          git log --since="7 days ago" --pretty=format: --name-only \
+            | grep '^2025413[0-9]\{3\}\.md$' | sort | uniq \
+            | sed 's/\.md//' || echo "暂无提交"
