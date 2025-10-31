@@ -1,0 +1,117 @@
+name: Auto Check & Merge Study Notes PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  validate-and-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get install -y gh jq
+
+      - name: Validate PR files
+        id: validate
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "开始检查 PR #$PR_NUMBER"
+          gh auth setup-git
+
+          PR_FILES=$(gh pr view $PR_NUMBER --json files --jq '.files[].path')
+          echo "检测到文件: $PR_FILES"
+
+          VALID=true
+          ERRORS=""
+
+          for FILE in $PR_FILES; do
+            # 检查扩展名
+            if [[ ! $FILE =~ \.md$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 不是 Markdown (.md) 文件\n"
+              VALID=false
+              continue
+            fi
+
+            # 检查文件名格式（10位数字，以2025413开头）
+            BASENAME=$(basename "$FILE" .md)
+            if [[ ! $BASENAME =~ ^2025413[0-9]{3}$ ]]; then
+              ERRORS+="❌ 文件名 **$BASENAME** 不符合格式，应以 \`2025413\` 开头并为 10 位数字\n"
+              VALID=false
+              continue
+            fi
+
+            # 检查 YAML 头部
+            HEAD_CONTENT=$(head -n 10 "$FILE")
+
+            if ! echo "$HEAD_CONTENT" | grep -q "^---"; then
+              ERRORS+="❌ 文件 **$FILE** 缺少 YAML 头部开始标记 \`---\`\n"
+              VALID=false
+              continue
+            fi
+
+            for key in title date tags copyright_author; do
+              if ! echo "$HEAD_CONTENT" | grep -q "$key:"; then
+                ERRORS+="❌ 文件 **$FILE** YAML 头部缺少字段：\`$key:\`\n"
+                VALID=false
+              fi
+            done
+
+            # 检查 tags
+            if ! echo "$HEAD_CONTENT" | grep -q "tags: *笔记"; then
+              ERRORS+="❌ 文件 **$FILE** 的 \`tags\` 字段必须为：\`tags: 笔记\`\n"
+              VALID=false
+            fi
+
+            # 检查 copyright_author
+            AUTHOR=$(echo "$HEAD_CONTENT" | grep "copyright_author:" | awk -F': ' '{print $2}' | tr -d '\r')
+            if [[ -z "$AUTHOR" ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 \`copyright_author\` 为空\n"
+              VALID=false
+            elif [[ ! $AUTHOR =~ ^[A-Za-z0-9_一-龥]+$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 \`copyright_author\` 含有非法字符，只能使用字母、数字、下划线或中文\n"
+              VALID=false
+            elif [[ $AUTHOR =~ ^[0-9]{10}$ ]]; then
+              ERRORS+="❌ 文件 **$FILE** 的 \`copyright_author\` 不应为学号\n"
+              VALID=false
+            fi
+          done
+
+          echo "validation=$VALID" >> $GITHUB_OUTPUT
+          echo -e "$ERRORS" > errors.txt
+
+      # 🟡 自动评论不合格 PR
+      - name: Comment and close invalid PR
+        if: steps.validate.outputs.validation == 'false'
+        run: |
+          echo "❌ PR 未通过检查，准备发送反馈评论..."
+          COMMENT_BODY="⚠️ **您的 PR 未通过自动检查，请修改后重新提交。**\n\n"
+          COMMENT_BODY+="以下是检测到的问题：\n\n"
+          COMMENT_BODY+="$(cat errors.txt)\n\n"
+          COMMENT_BODY+="✅ **参考正确格式：**\n\n\`\`\`yaml\n"
+          COMMENT_BODY+="---\n"
+          COMMENT_BODY+="title: 示例标题\n"
+          COMMENT_BODY+="date: 2025-10-31 17:43:20\n"
+          COMMENT_BODY+="tags: 笔记\n"
+          COMMENT_BODY+="copyright_author: Alice\n"
+          COMMENT_BODY+="---\n"
+          COMMENT_BODY+="\`\`\`\n\n"
+          COMMENT_BODY+="📘 文件名示例：\`2025413047.md\`\n"
+          COMMENT_BODY+="（命名格式：以 2025413 开头的 10 位数字）"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT_BODY"
+          gh pr close ${{ github.event.pull_request.number }} --comment "❌ 未通过格式检查，请根据提示修改后重新提交。"
+
+      # 🟢 自动批准并合并
+      - name: Approve and merge valid PR
+        if: steps.validate.outputs.validation == 'true'
+        run: |
+          gh pr review ${{ github.event.pull_request.number }} --approve -b "✅ 格式检查通过，自动批准并合并。"
+          gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch --auto
