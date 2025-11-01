@@ -21,7 +21,8 @@ jobs:
       - name: Get changed files
         id: files
         run: |
-          echo "files=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path')" >> $GITHUB_OUTPUT
+          FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path' | tr '\n' ' ')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -34,7 +35,7 @@ jobs:
 
           for FILE in ${{ steps.files.outputs.files }}; do
             echo "检查文件: $FILE"
-            
+
             # 检查命名
             if ! [[ "$FILE" =~ $VALID_PATTERN ]]; then
               ERROR_MSG+="❌ 文件名不符合要求: $FILE（必须为形如 2025413XXX.md 的学号文件）\n"
@@ -69,6 +70,7 @@ jobs:
 
           if [ -n "$ERROR_MSG" ]; then
             echo "检查未通过"
+            # 输出到 step output
             echo "error_message<<EOF" >> $GITHUB_OUTPUT
             echo -e "$ERROR_MSG" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
@@ -84,14 +86,12 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             const pr = context.payload.pull_request;
-            const message = `🚫 **自动检查未通过：**
-
-${{ steps.validate.outputs.error_message }}`;
+            const errorMessage = '${{ steps.validate.outputs.error_message }}';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: pr.number,
-              body: message
+              body: `🚫 **自动检查未通过：**\n\n${errorMessage}`
             });
 
       - name: Close PR if failed
