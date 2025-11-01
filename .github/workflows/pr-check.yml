@@ -1,0 +1,110 @@
+name: 🧩 Check PR File Rules
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: files
+        run: |
+          echo "files=$(gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path')" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Validate file naming and content
+        id: validate
+        run: |
+          echo "🔍 开始检查文件..."
+          ERROR_MSG=""
+          VALID_PATTERN="^2025413[0-9]{3}\\.md$"
+
+          for FILE in ${{ steps.files.outputs.files }}; do
+            echo "检查文件: $FILE"
+            
+            # 检查命名
+            if ! [[ "$FILE" =~ $VALID_PATTERN ]]; then
+              ERROR_MSG+="❌ 文件名不符合要求: $FILE（必须为形如 2025413XXX.md 的学号文件）\n"
+              continue
+            fi
+
+            # 检查扩展名
+            if [[ "${FILE##*.}" != "md" ]]; then
+              ERROR_MSG+="❌ 文件格式错误: $FILE（必须是 .md 文件）\n"
+              continue
+            fi
+
+            # 检查 YAML Front Matter
+            if ! grep -q '^---' "$FILE"; then
+              ERROR_MSG+="❌ 缺少 YAML Front Matter 开头: $FILE\n"
+              continue
+            fi
+
+            REQUIRED_FIELDS=("title:" "date:" "tags:" "copyright_author:")
+            for FIELD in "${REQUIRED_FIELDS[@]}"; do
+              if ! grep -q "$FIELD" "$FILE"; then
+                ERROR_MSG+="❌ YAML 缺少字段 $FIELD: $FILE\n"
+              fi
+            done
+
+            # 检查日期格式
+            DATE=$(grep "^date:" "$FILE" | awk '{print $2, $3}')
+            if ! echo "$DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'; then
+              ERROR_MSG+="❌ date 格式不正确（应为 YYYY-MM-DD HH:MM:SS）: $FILE\n"
+            fi
+          done
+
+          if [ -n "$ERROR_MSG" ]; then
+            echo "检查未通过"
+            echo "error_message<<EOF" >> $GITHUB_OUTPUT
+            echo -e "$ERROR_MSG" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ 所有文件符合要求。"
+          fi
+
+      - name: Comment on PR if failed
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            const message = `🚫 **自动检查未通过：**
+
+${{ steps.validate.outputs.error_message }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: message
+            });
+
+      - name: Close PR if failed
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              state: "closed"
+            });
+            console.log("❌ PR 已被自动关闭。");
